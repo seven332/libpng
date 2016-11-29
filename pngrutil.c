@@ -241,6 +241,40 @@ png_crc_finish(png_structrp png_ptr, png_uint_32 skip)
    return (0);
 }
 
+#ifdef PNG_INDEX_SUPPORTED
+/* If tile index is used to skip over data and decode a partial image
+ * the crc value may be incorrect.
+ * The crc will only be calculated for the partial data read,
+ * not the entire data, which will result in an incorrect crc value.
+ * This function treats a png_crc_error as a warning, as opposed to the
+ * original function png_crc_finish, which will treat it as an error.
+ */
+int /* PRIVATE */
+png_opt_crc_finish(png_structrp png_ptr, png_uint_32 skip)
+{
+   while (skip > 0)
+   {
+      png_uint_32 len;
+      png_byte tmpbuf[PNG_INFLATE_BUF_SIZE];
+
+      len = (sizeof tmpbuf);
+      if (len > skip)
+         len = skip;
+      skip -= len;
+
+      png_crc_read(png_ptr, tmpbuf, len);
+   }
+
+   if (png_crc_error(png_ptr))
+   {
+      png_chunk_warning(png_ptr, "CRC error");
+      return (1);
+   }
+
+   return (0);
+}
+#endif
+
 /* Compare the CRC stored in the PNG file with that calculated by libpng from
  * the data it has read thus far.
  */
@@ -4024,6 +4058,12 @@ png_read_IDAT_data(png_structrp png_ptr, png_bytep output,
 
          while (png_ptr->idat_size == 0)
          {
+#ifdef PNG_INDEX_SUPPORTED
+            if (png_ptr->index) {
+               png_opt_crc_finish(png_ptr, 0);
+               png_ptr->index->stream_idat_position = png_ptr->total_data_read;
+            } else
+#endif
             png_crc_finish(png_ptr, 0);
 
             png_ptr->idat_size = png_read_chunk_header(png_ptr);
@@ -4102,7 +4142,14 @@ png_read_IDAT_data(png_structrp png_ptr, png_bytep output,
          break;
       }
 
-      if (ret != Z_OK)
+      if (ret != Z_OK) {
+#ifdef PNG_INDEX_SUPPORTED
+        if (png_ptr->index) {
+          if (png_ptr->row_number != png_ptr->height - 1) {
+            png_error(png_ptr, png_ptr->zstream.msg ? png_ptr->zstream.msg : "Decompression error");
+          }
+        } else
+#endif
       {
          png_zstream_error(png_ptr, ret);
 
@@ -4123,6 +4170,7 @@ png_read_IDAT_data(png_structrp png_ptr, png_bytep output,
             return;
          }
       }
+    }
    } while (avail_out > 0);
 
    if (avail_out > 0)
@@ -4182,9 +4230,38 @@ png_read_finish_IDAT(png_structrp png_ptr)
        * crc_finish here.  If idat_size is non-zero we also need to read the
        * spurious bytes at the end of the chunk now.
        */
+#ifdef PNG_INDEX_SUPPORTED
+      if (png_ptr->index)
+      {
+        (void)png_opt_crc_finish(png_ptr, png_ptr->idat_size);
+        png_ptr->index->stream_idat_position = png_ptr->total_data_read;
+      }
+      else
+#endif
       (void)png_crc_finish(png_ptr, png_ptr->idat_size);
    }
 }
+
+#ifdef PNG_INDEX_SUPPORTED
+void /* PRIVATE */
+png_set_interlaced_pass(png_structp png_ptr, int pass)
+{
+   /* Arrays to facilitate easy interlacing - use pass (0 - 6) as index */
+   /* Start of interlace block */
+   PNG_CONST int png_pass_start[7] = {0, 4, 0, 2, 0, 1, 0};
+   /* Offset to next interlace block */
+   PNG_CONST int png_pass_inc[7] = {8, 8, 4, 4, 2, 2, 1};
+   /* Start of interlace block in the y direction */
+   PNG_CONST int png_pass_ystart[7] = {0, 0, 4, 0, 2, 0, 1};
+   /* Offset to next interlace block in the y direction */
+   PNG_CONST int png_pass_yinc[7] = {8, 8, 8, 4, 4, 2, 2};
+   png_ptr->pass = pass;
+   png_ptr->iwidth = (png_ptr->width +
+         png_pass_inc[png_ptr->pass] - 1 -
+         png_pass_start[png_ptr->pass]) /
+      png_pass_inc[png_ptr->pass];
+}
+#endif
 
 void /* PRIVATE */
 png_read_finish_row(png_structrp png_ptr)
